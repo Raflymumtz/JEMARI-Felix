@@ -1,0 +1,22 @@
+# Virtual environment (±4,9 GB — install ulang lewat requirements.txt)
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Dataset gambar (±12,8 GB, jauh di atas batas GitHub).
+# Simpan/bagikan lewat Google Drive; hanya manifest yang ikut ke repo.
+Dataset/*
+!Dataset/PROCESSED/
+Dataset/PROCESSED/*
+!Dataset/PROCESSED/manifest.json
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/

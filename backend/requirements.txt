@@ -1,0 +1,14 @@
+# Install CUDA-enabled torch/torchvision first (matches the installed
+# NVIDIA driver's CUDA version — this project was set up with CUDA 12.8
+# wheels for an RTX 50-series GPU):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+#
+# Then the rest:
+mediapipe>=1.0.0
+opencv-python>=4.10
+fastapi>=0.110
+uvicorn[standard]>=0.30
+scikit-learn>=1.4
+numpy
+python-multipart
+websockets

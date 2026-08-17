@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Penerjemah BISINDO Real-Time</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-icon" aria-hidden="true">🤟</span>
+        <div>
+          <h1>Penerjemah Bahasa Isyarat Indonesia</h1>
+          <p class="subtitle">Computer Vision + Transformer &mdash; Sistem Penerjemah Real-Time untuk Aksesibilitas Komunikasi Digital</p>
+        </div>
+      </div>
+      <div class="status-pill" id="statusPill">
+        <span class="dot" id="statusDot"></span>
+        <span id="statusText">Menghubungkan...</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel camera-panel">
+      <div class="video-wrap">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas" hidden></canvas>
+        <div class="hand-indicator" id="handIndicator">Tangan tidak terdeteksi</div>
+        <div class="letter-overlay" id="letterOverlay">&mdash;</div>
+      </div>
+
+      <div class="controls">
+        <button id="startBtn" class="btn primary">Mulai Kamera</button>
+        <button id="stopBtn" class="btn" disabled>Hentikan Kamera</button>
+      </div>
+
+      <div class="confidence-row">
+        <span>Keyakinan Model</span>
+        <div class="confidence-bar"><div class="confidence-fill" id="confidenceFill"></div></div>
+        <span id="confidenceValue">0%</span>
+      </div>
+
+      <div class="latency-row">
+        <span>Latensi end-to-end</span>
+        <strong id="latencyValue">&ndash; ms</strong>
+      </div>
+    </section>
+
+    <section class="panel text-panel">
+      <h2>Hasil Terjemahan</h2>
+      <textarea id="outputText" rows="6" placeholder="Hasil ejaan huruf BISINDO akan muncul di sini..."></textarea>
+
+      <div class="text-controls">
+        <button id="speakBtn" class="btn primary">🔊 Ucapkan</button>
+        <button id="spaceBtn" class="btn">Spasi</button>
+        <button id="backspaceBtn" class="btn">⌫ Hapus</button>
+        <button id="clearBtn" class="btn danger">Bersihkan</button>
+      </div>
+
+      <p class="hint">
+        Arahkan satu tangan ke kamera dan bentuk huruf abjad BISINDO. Sistem akan mengunci sebuah
+        huruf setelah prediksi stabil selama beberapa frame berurutan (voting temporal), lalu
+        otomatis menambahkan spasi ketika tangan menjauh dari kamera.
+      </p>
+
+      <div class="alphabet-support" id="alphabetSupport"></div>
+    </section>
+
+    <section class="panel about-panel">
+      <details>
+        <summary>Tentang Penelitian &amp; Performa Model</summary>
+        <div id="aboutContent" class="about-content">
+          <p>Memuat metrik model...</p>
+        </div>
+        <div class="research-meta">
+          <p><strong>Judul:</strong> Pengembangan Model Translasi Bahasa Isyarat Indonesia Berbasis Computer Vision dan Transformer Architecture sebagai Sistem Penerjemah Real-Time untuk Aksesibilitas Komunikasi Digital</p>
+          <p><strong>Tim Peneliti:</strong> Felix Aria &amp; Muhammad Raysar Al-Fatih &mdash; SMAN 1 Balikpapan</p>
+          <p><strong>Bidang:</strong> OPSI 2026 &mdash; Teknologi dan Rekayasa</p>
+          <p><strong>Arsitektur:</strong> CNN (MobileNetV2, ekstraksi fitur spasial) + Transformer self-attention (pemodelan temporal antar frame), dilatih dengan akselerasi GPU (VGA/CUDA).</p>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>Prototipe penelitian &middot; SMAN 1 Balikpapan &middot; OPSI 2026</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
