@@ -71,7 +71,7 @@ def main():
 
     classes = list_classes()
     if not classes:
-        raise SystemExit("No processed classes found — run `python preprocess.py --force` first.")
+        raise SystemExit("No processed classes found - run `python preprocess.py --force` first.")
 
     manifest_path = os.path.join(config.PROCESSED_DATASET_DIR, "manifest.json")
     manifest = {}
@@ -94,7 +94,7 @@ def main():
         print(f"  frames kept                  {kept:>7}")
         print(f"  ... with a detected hand     {hand:>7}  ({hand/max(kept,1)*100:.1f}%)")
     else:
-        print("  manifest.json missing — rerun preprocess.py")
+        print("  manifest.json missing - rerun preprocess.py")
 
     print()
     print("=" * 78)

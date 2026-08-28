@@ -92,7 +92,7 @@ def load_model():
               f"({checkpoint['num_classes']} classes, {model.backbone_name})")
     else:
         MODEL = None
-        print("WARNING: no trained model found yet — run train.py first. "
+        print("WARNING: no trained model found yet - run train.py first. "
               "The server will still start but predictions will be disabled.")
 
 
@@ -296,7 +296,7 @@ def main():
         cert, key = ensure_self_signed_cert(os.path.join(os.path.dirname(__file__), "certs"))
         ssl_kwargs = {"ssl_certfile": cert, "ssl_keyfile": key}
         print("\nServing over HTTPS with a self-signed certificate.")
-        print("Chrome will show a warning — tap Advanced -> Proceed to accept it.")
+        print("Chrome will show a warning - tap Advanced -> Proceed to accept it.")
         print("For a demo, a real certificate via `cloudflared tunnel --url "
               "http://localhost:8000` is more reliable (see README).\n")
 

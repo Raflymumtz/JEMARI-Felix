@@ -24,10 +24,12 @@ Dataset/DATASET FELIX/<HURUF>/*            (dataset mentah: 26 kelas, 32.906 ber
 Dataset/PROCESSED/<HURUF>/{*.jpg, meta.npz}
         |
         v  (backend/audit_dataset.py — GERBANG: pastikan split tidak bocor)
-        v  (backend/dataset.py   — split per sesi + augmentasi online)
+        v  (backend/dataset.py   — cache frame di RAM + split per sesi + augmentasi online)
         v  (backend/model.py     — MobileNetV3-Small + landmark + Transformer)
         v  (backend/train.py     — training GPU, metrik lengkap per kelas)
 backend/saved_model/{model.pt, label_map.json, metrics.json, confusion_matrix.csv}
+        |
+        v  (backend/report.py — laporan performa lengkap, bisa dicetak ulang kapan saja)
         |
         v  (backend/server.py — FastAPI + WebSocket, inferensi real-time)
 frontend/  (webcam capture, tampilan huruf & teks, text-to-speech)
@@ -137,7 +139,23 @@ bawah baru bermakna karena gerbang ini lolos.
 
 ## Hasil
 
-<!-- RESULTS -->
+Angka lengkap ada di `backend/saved_model/metrics.json` dan bisa dicetak kapan
+saja:
+
+```bash
+cd backend
+python report.py
+```
+
+Laporan itu berisi akurasi, **error rate**, presisi/recall/F1 (macro dan
+weighted), tabel per huruf beserta jumlah sampel ujinya, **confusion matrix**
+lengkap dengan daftar kesalahan paling sering, dan jejak audit dataset.
+Laporan yang sama otomatis tercetak di akhir `python train.py`.
+
+Sebagai pembanding, versi sebelum revisi ini melaporkan 96,99% — angka yang
+tidak sah karena test set-nya tercemar salinan augmentasi dari data latih
+(lihat bagian di atas). Angka apa pun yang keluar sekarang lebih rendah namun
+sah, dan itulah yang layak dipakai di laporan penelitian.
 
 ## Setup
 
@@ -168,18 +186,72 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
    python audit_dataset.py
    ```
 
-3. **Training** (pakai GPU otomatis jika tersedia; ±20 menit untuk 40 epoch):
+3. **Training** (pakai GPU otomatis jika tersedia):
    ```bash
    python train.py
    ```
    Menghasilkan `saved_model/model.pt`, `label_map.json`, `metrics.json`,
-   `history.csv`, dan `confusion_matrix.csv`.
+   `history.csv`, dan `confusion_matrix.csv`, lalu mencetak laporan performa
+   lengkap.
 
-4. **Jalankan website**:
+   Run pertama membangun dulu **cache frame** (`Dataset/PROCESSED/frames_cache.npy`,
+   ±1 GB, sekali saja ±15 detik): seluruh gambar hasil preprocessing didekode
+   satu kali ke satu berkas memory-mapped. Tanpa itu, decode JPEG memakan 30%
+   pipeline data dan GPU menganggur menunggu CPU. Cache dibangun ulang otomatis
+   kalau dataset berubah.
+
+   Kalau training sudah selesai tetapi evaluasi akhirnya gagal (atau Anda
+   ingin laporannya saja dari checkpoint yang ada), gunakan:
+   ```bash
+   python train.py --eval-only
+   ```
+
+4. **Laporan performa** (kapan saja setelah training):
+   ```bash
+   python report.py              # laporan lengkap
+   python report.py --no-matrix  # tanpa confusion matrix
+   python report.py --csv        # sekaligus tulis ulang confusion_matrix.csv
+   ```
+
+5. **Jalankan website**:
    ```bash
    python server.py
    ```
    Buka `http://localhost:8000` (izinkan akses kamera).
+
+### Catatan performa training
+
+Model ini kecil (1,65 juta parameter, 112x112 px), jadi kerja GPU-nya hanya
+sekitar 4 detik per epoch. Sisa waktu dipakai CPU untuk augmentasi. Yang sudah
+dilakukan supaya GPU tidak menganggur:
+
+| Perubahan | Efek |
+|---|---|
+| Cache frame memory-mapped | decode JPEG hilang dari pipeline (30% biaya CPU) |
+| Batch dikirim sebagai uint8, dinormalisasi di GPU | trafik antar-proses 38,5 MB -> 9,6 MB per batch |
+| Augmentasi seluruhnya uint8 | 5,5 konversi dtype per frame -> 0 |
+| `batch_size` 64, 12 worker, `cudnn.benchmark` | GPU dapat batch lebih besar dan lebih sering |
+
+Kalau nanti ingin GPU benar-benar terpakai penuh, jalannya bukan lagi
+mengoptimalkan pipeline melainkan memperbesar modelnya (input 160px — crop
+sudah tersimpan pada resolusi itu — atau backbone MobileNetV3-Large). Itu
+menaikkan akurasi tetapi juga ukuran model.
+
+### Kalau muncul "WinError 1455: The paging file is too small"
+
+Setiap worker DataLoader yang di-spawn Windows mengimpor torch dan meng-commit
+1–2 GB paging file untuk DLL CUDA. Versi awal memberi worker ke ketiga loader
+sekaligus (train, val, test) dengan `persistent_workers`, sehingga ada 24 proses
+hidup selama training dan 36 begitu evaluasi akhir dimulai — melebihi kapasitas
+paging file, dan gagal tepat di baris terakhir setelah 21 epoch mulus.
+
+Sekarang hanya loader **training** yang memakai worker (ia yang mengerjakan
+augmentasi berat); val dan test hanya ~230 sekuens tanpa augmentasi, selesai di
+bawah satu detik dengan satu proses. Worker training juga dilepas sebelum
+evaluasi akhir. Maksimum 12 proses, bukan 36.
+
+Kalau tetap muncul di mesin lain, turunkan angka pada baris `num_workers` di
+[train.py](backend/train.py), atau besarkan paging file Windows.
 
 ### Uji integritas (opsional tapi disarankan setelah mengubah augmentasi)
 

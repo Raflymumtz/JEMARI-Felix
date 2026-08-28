@@ -47,7 +47,11 @@ FF_DIM = 384
 DROPOUT = 0.2
 
 # --- training ---
-BATCH_SIZE = 64
+# Kept at 32: this is the configuration whose training dynamics are known
+# good. Raising it to 64 improves raw GPU throughput by ~1s/epoch, which
+# stopped mattering once the frame cache removed the data bottleneck, but it
+# also halves the number of optimizer steps per epoch.
+BATCH_SIZE = 32
 EPOCHS = 40
 LR_BACKBONE = 1e-4      # pretrained ImageNet features: fine-tune gently
 LR_HEAD = 1e-3          # everything trained from scratch

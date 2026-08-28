@@ -20,6 +20,7 @@ teleport between frames of one sequence) while photometric noise is redrawn
 per frame (so the Transformer learns to stabilise a jittery webcam stream
 instead of eight identical stills).
 """
+import json
 import math
 import os
 
@@ -51,7 +52,7 @@ def load_class_meta(letter: str):
     meta_path = os.path.join(class_dir, META_FILENAME)
     if not os.path.exists(meta_path):
         raise FileNotFoundError(
-            f"{meta_path} missing — run `python preprocess.py --force` first."
+            f"{meta_path} missing - run `python preprocess.py --force` first."
         )
     with np.load(meta_path, allow_pickle=False) as meta:
         return {
@@ -226,10 +227,93 @@ def split_class_indices(meta, return_stats=False):
     return (groups, n_demoted) if return_stats else groups
 
 
+# --------------------------------------------------------------------------
+# frame cache
+# --------------------------------------------------------------------------
+#
+# Decoding JPEGs was 30% of the whole data pipeline and, together with the
+# rest of the per-frame CPU work, left the GPU idle roughly 80% of the time.
+# Every processed frame is therefore decoded exactly once into a single
+# memory-mapped uint8 array (~1 GB for 13.7k frames at 160px).
+#
+# A memory map rather than a shared torch tensor: the operating system's page
+# cache backs the file, so all twelve DataLoader workers read the same
+# physical pages without any of them holding a private copy, and it survives
+# process spawn on Windows without special handling.
+
+FRAME_CACHE_PATH = os.path.join(config.PROCESSED_DATASET_DIR, "frames_cache.npy")
+FRAME_CACHE_INDEX = os.path.join(config.PROCESSED_DATASET_DIR, "frames_cache.json")
+
+
+def _cache_signature(classes):
+    return {
+        "cache_img_size": config.CACHE_IMG_SIZE,
+        "counts": {c: len(load_class_meta(c)["files"]) for c in classes},
+    }
+
+
+def ensure_frame_cache(verbose=True):
+    """Build the decoded-frame cache if it is missing or out of date.
+
+    Returns {class: first global frame index}. Takes ~15 s to build and is
+    then reused by every later run.
+    """
+    classes = list_classes()
+    signature = _cache_signature(classes)
+
+    if os.path.exists(FRAME_CACHE_PATH) and os.path.exists(FRAME_CACHE_INDEX):
+        with open(FRAME_CACHE_INDEX) as f:
+            stored = json.load(f)
+        if stored.get("signature") == signature:
+            return stored["offsets"]
+
+    size = config.CACHE_IMG_SIZE
+    offsets, total = {}, 0
+    for c in classes:
+        offsets[c] = total
+        total += signature["counts"][c]
+
+    if verbose:
+        print(f"Building frame cache: {total} frames at {size}px "
+              f"({total * size * size * 3 / 1e9:.2f} GB) -> {FRAME_CACHE_PATH}")
+
+    arr = np.lib.format.open_memmap(
+        FRAME_CACHE_PATH, mode="w+", dtype=np.uint8, shape=(total, size, size, 3)
+    )
+    for c in classes:
+        meta = load_class_meta(c)
+        base = offsets[c]
+        for i, fname in enumerate(meta["files"]):
+            img = cv2.imread(os.path.join(meta["dir"], fname))
+            if img.shape[0] != size:
+                img = cv2.resize(img, (size, size), interpolation=cv2.INTER_AREA)
+            arr[base + i] = img
+        if verbose:
+            print(f"  cached {c} ({len(meta['files'])} frames)", flush=True)
+    arr.flush()
+    del arr
+
+    with open(FRAME_CACHE_INDEX, "w") as f:
+        json.dump({"signature": signature, "offsets": offsets}, f, indent=2)
+    if verbose:
+        print("Frame cache ready.")
+    return offsets
+
+
+def frame_paths():
+    """Global frame index -> path on disk (for tools that need the file)."""
+    paths = []
+    for c in list_classes():
+        meta = load_class_meta(c)
+        paths.extend(os.path.join(meta["dir"], f) for f in meta["files"])
+    return paths
+
+
 def build_splits():
     classes = list_classes()
     label_map = {i: c for i, c in enumerate(classes)}
     class_to_idx = {c: i for i, c in label_map.items()}
+    offsets = ensure_frame_cache()
 
     train_samples, val_samples, test_samples = [], [], []
     class_counts = {}
@@ -238,9 +322,9 @@ def build_splits():
     for c in classes:
         meta = load_class_meta(c)
         label = class_to_idx[c]
-        paths = [os.path.join(meta["dir"], f) for f in meta["files"]]
+        base = offsets[c]
         landmarks = meta["landmarks"]
-        class_counts[c] = len(paths)
+        class_counts[c] = len(meta["files"])
 
         groups = split_class_indices(meta)
         group_counts[c] = len(groups)
@@ -253,7 +337,7 @@ def build_splits():
             ):
                 for window in _make_windows(idx_list, config.WINDOW, stride, allow_pad):
                     dst.append((
-                        [paths[i] for i in window],
+                        np.array([base + i for i in window], dtype=np.int64),
                         landmarks[window],
                         label,
                     ))
@@ -389,9 +473,22 @@ class SequenceDataset(Dataset):
     def __init__(self, samples, augment=False):
         self.samples = samples
         self.augment = augment
+        self._frames = None
 
     def __len__(self):
         return len(self.samples)
+
+    @property
+    def frames(self):
+        """The shared frame cache, opened lazily once per worker process.
+
+        Opened here rather than in __init__ so the memory map is never
+        pickled across the process boundary — each worker maps the same file
+        itself and the OS page cache does the sharing.
+        """
+        if self._frames is None:
+            self._frames = np.load(FRAME_CACHE_PATH, mmap_mode="r")
+        return self._frames
 
     def _to_chw(self, img_bgr):
         """BGR HWC uint8 -> RGB CHW uint8. Normalisation happens on the GPU."""
@@ -399,7 +496,7 @@ class SequenceDataset(Dataset):
         return np.ascontiguousarray(np.transpose(rgb, (2, 0, 1)))
 
     def __getitem__(self, idx):
-        paths, landmarks, label = self.samples[idx]
+        frame_ids, landmarks, label = self.samples[idx]
 
         if self.augment:
             params = _geometric_params()
@@ -408,9 +505,10 @@ class SequenceDataset(Dataset):
         else:
             params = matrix = None
 
+        cache = self.frames
         frames = []
-        for path in paths:
-            img = cv2.imread(path)
+        for frame_id in frame_ids:
+            img = np.array(cache[frame_id])   # copy out of the read-only map
             if self.augment:
                 img = cv2.warpAffine(
                     img, matrix, (config.IMG_SIZE, config.IMG_SIZE),

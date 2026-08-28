@@ -35,7 +35,7 @@ def size_mb(path):
 
 def main():
     if not os.path.exists(config.MODEL_PATH):
-        raise SystemExit("No trained model found — run `python train.py` first.")
+        raise SystemExit("No trained model found - run `python train.py` first.")
 
     os.makedirs(EXPORT_DIR, exist_ok=True)
     device = get_device()

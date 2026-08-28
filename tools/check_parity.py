@@ -26,7 +26,6 @@ from dataset import (
     _affine_matrix,
     _geometric_params,
     apply_geometry_to_landmarks,
-    build_splits,
     list_classes,
     load_class_meta,
 )
@@ -57,39 +56,39 @@ def draw_landmarks(img, vec, color=(0, 255, 0)):
 
 
 def check_augmentation_parity(n=12):
-    train_samples, _, _, label_map, _, _ = build_splits()
+    """Contact sheet: the skeleton must move with the picture behind it."""
     os.makedirs(OUT_DIR, exist_ok=True)
-
     rng = np.random.default_rng(0)
-    picks = [i for i in rng.choice(len(train_samples), size=n * 4, replace=False)]
 
-    tiles, used = [], 0
-    for idx in picks:
-        paths, landmarks, label = train_samples[idx]
-        if landmarks[0][-1] < 0.5:      # only frames with a real hand are informative
+    tiles = []
+    for letter in list_classes():
+        meta = load_class_meta(letter)
+        usable = [i for i in range(len(meta["files"])) if meta["landmarks"][i][-1] > 0.5]
+        if not usable:
             continue
+        i = int(rng.choice(usable))
+        img = cv2.imread(os.path.join(meta["dir"], meta["files"][i]))
+        lm = meta["landmarks"][i:i + 1]
+
         params = _geometric_params()
         matrix = _affine_matrix(params, config.IMG_SIZE)
-        aug_lm = apply_geometry_to_landmarks(params, landmarks)
+        aug_lm = apply_geometry_to_landmarks(params, lm)
 
-        img = cv2.imread(paths[0])
         aug = cv2.warpAffine(img, matrix, (config.IMG_SIZE, config.IMG_SIZE),
                              flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
         before = draw_landmarks(cv2.resize(img, (config.IMG_SIZE, config.IMG_SIZE)),
-                                landmarks[0].copy())
+                                lm[0].copy())
         after = draw_landmarks(aug.copy(), aug_lm[0].copy(), color=(255, 200, 0))
-        cv2.putText(after, f"{label_map[label]} rot{params['angle']:+.0f}"
+        cv2.putText(after, f"{letter} rot{params['angle']:+.0f}"
                            f"{' flip' if params['flip'] else ''}",
                     (3, config.IMG_SIZE - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
         tiles.append(np.hstack([before, after]))
-        used += 1
-        if used >= n:
+        if len(tiles) >= n:
             break
 
     rows = [np.hstack(tiles[i:i + 3]) for i in range(0, len(tiles) - len(tiles) % 3, 3)]
-    sheet = np.vstack(rows)
     out = os.path.join(OUT_DIR, "landmark_augmentation.png")
-    cv2.imwrite(out, sheet)
+    cv2.imwrite(out, np.vstack(rows))
     print(f"[1] Wrote {out}")
     print("    Each pair is (original | augmented). The skeleton must rotate and")
     print("    mirror together with the picture behind it.")
@@ -97,10 +96,11 @@ def check_augmentation_parity(n=12):
 
 def check_geometry_is_rigid():
     """Rotation+flip must preserve the shape of the hand exactly."""
-    _, _, test_samples, _, _, _ = build_splits()
     worst = 0.0
-    for paths, landmarks, _ in test_samples[:200]:
-        if landmarks[0][-1] < 0.5:
+    for letter in list_classes()[:10]:
+        meta = load_class_meta(letter)
+        landmarks = meta["landmarks"][:40]
+        if not len(landmarks):
             continue
         params = _geometric_params()
         aug = apply_geometry_to_landmarks(params, landmarks)

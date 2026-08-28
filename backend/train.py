@@ -16,8 +16,10 @@ Run:
 Requires an NVIDIA GPU (VGA) with CUDA; falls back to CPU automatically
 if none is found, but that will be far slower.
 """
+import argparse
 import copy
 import csv
+import gc
 import json
 import math
 import os
@@ -43,6 +45,7 @@ from dataset import (
     normalize_frames,
 )
 from model import SignCNNTransformer, count_parameters
+from report import print_report
 
 
 def set_seed(seed):
@@ -57,7 +60,7 @@ def get_device():
         name = torch.cuda.get_device_name(0)
         print(f"[GPU] Training on {name} (CUDA {torch.version.cuda})")
         return torch.device("cuda")
-    print("[CPU] No CUDA GPU found — training on CPU (this will be slow).")
+    print("[CPU] No CUDA GPU found - training on CPU (this will be slow).")
     return torch.device("cpu")
 
 
@@ -176,6 +179,20 @@ def evaluate_test_set(model, loader, device):
     return acc, precision, recall, f1, all_labels, all_preds
 
 
+def weighted_metrics(y_true, y_pred):
+    """Support-weighted averages, reported next to the macro ones.
+
+    Macro treats every letter equally, which is the fairer figure when the
+    letters have unequal test counts; weighted reflects what a user actually
+    experiences on this test set. Quoting both avoids implying either one is
+    "the" accuracy.
+    """
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average="weighted", zero_division=0
+    )
+    return float(precision), float(recall), float(f1)
+
+
 @torch.no_grad()
 def measure_latency(model, device, n_warmup=10, n_measure=50):
     model.eval()
@@ -233,6 +250,11 @@ def dataset_hygiene():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Train the BISINDO CNN+Transformer model.")
+    parser.add_argument("--eval-only", action="store_true",
+                        help="skip training: evaluate the saved checkpoint and write the report")
+    args = parser.parse_args()
+
     set_seed(config.SEED)
     device = get_device()
     # every batch has the same shape, so autotuning pays off immediately
@@ -250,24 +272,34 @@ def main():
     val_ds = SequenceDataset(val_samples, augment=False)
     test_ds = SequenceDataset(test_samples, augment=False)
 
-    # Online augmentation is CPU-heavy; without workers the GPU sits idle
-    # waiting for data. main() is guarded by __main__ so this is safe on Windows.
+    # Only the *training* loader gets worker processes. It is the one doing
+    # heavy online augmentation over 4551 windows; validation and test are
+    # ~230 windows each with no augmentation, which a single process finishes
+    # in well under a second.
+    #
+    # This is not just a tuning choice. On Windows every spawned worker
+    # imports torch and commits 1-2 GB of paging file for the CUDA DLLs.
+    # Giving all three loaders 12 persistent workers meant 24 processes alive
+    # through training and 36 once the test loader started, which failed with
+    # "WinError 1455: The paging file is too small for this operation" —
+    # after 21 epochs of otherwise perfect training.
     num_workers = min(12, max(1, (os.cpu_count() or 4) // 2))
-    loader_kwargs = dict(
+    train_kwargs = dict(
         num_workers=num_workers,
         pin_memory=(device.type == "cuda"),
         persistent_workers=num_workers > 0,
         prefetch_factor=4 if num_workers > 0 else None,
     )
+    eval_kwargs = dict(num_workers=0, pin_memory=(device.type == "cuda"))
 
     sampler = WeightedRandomSampler(
         compute_sample_weights(train_samples, num_classes),
         num_samples=len(train_samples),
         replacement=True,
     )
-    train_loader = DataLoader(train_ds, batch_size=config.BATCH_SIZE, sampler=sampler, **loader_kwargs)
-    val_loader = DataLoader(val_ds, batch_size=config.BATCH_SIZE, shuffle=False, **loader_kwargs)
-    test_loader = DataLoader(test_ds, batch_size=config.BATCH_SIZE, shuffle=False, **loader_kwargs)
+    train_loader = DataLoader(train_ds, batch_size=config.BATCH_SIZE, sampler=sampler, **train_kwargs)
+    val_loader = DataLoader(val_ds, batch_size=config.BATCH_SIZE, shuffle=False, **eval_kwargs)
+    test_loader = DataLoader(test_ds, batch_size=config.BATCH_SIZE, shuffle=False, **eval_kwargs)
 
     # Written before training rather than at the end. The checkpoint is saved
     # every time validation improves, so a run interrupted midway would
@@ -276,7 +308,8 @@ def main():
     with open(config.LABEL_MAP_PATH, "w") as f:
         json.dump(label_map, f, indent=2)
 
-    model = SignCNNTransformer(num_classes=num_classes, pretrained=True).to(device)
+    model = SignCNNTransformer(num_classes=num_classes,
+                               pretrained=not args.eval_only).to(device)
     n_params = count_parameters(model)
     print(f"Backbone {model.backbone_name}: {n_params/1e6:.2f}M parameters")
 
@@ -292,7 +325,7 @@ def main():
     patience_counter = 0
     history = []
 
-    for epoch in range(1, config.EPOCHS + 1):
+    for epoch in range(1, 1 if args.eval_only else config.EPOCHS + 1):
         t0 = time.time()
         train_loss, train_acc, train_f1 = run_epoch(
             model, train_loader, criterion, optimizer, device, scaler, ema=ema, train=True
@@ -329,12 +362,21 @@ def main():
                 print(f"Early stopping (no val_f1 improvement in {config.PATIENCE} epochs).")
                 break
 
-    with open(config.HISTORY_PATH, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(history[0].keys()))
-        writer.writeheader()
-        writer.writerows(history)
+    # Empty under --eval-only; the existing curve from the real run is kept.
+    if history:
+        with open(config.HISTORY_PATH, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(history[0].keys()))
+            writer.writeheader()
+            writer.writerows(history)
+
+    # Training is over, so hand the worker processes — and the paging file they
+    # reserved — back before the evaluation pass allocates anything further.
+    del train_loader, val_loader
+    gc.collect()
 
     print("\nLoading best checkpoint for final test-set evaluation...")
+    if not os.path.exists(config.MODEL_PATH):
+        raise SystemExit(f"{config.MODEL_PATH} not found - run training first.")
     checkpoint = torch.load(config.MODEL_PATH, map_location=device)
     model.load_state_dict(checkpoint["model_state"])
 
@@ -343,11 +385,17 @@ def main():
     cpu_latency_mean, _ = measure_latency(copy.deepcopy(model).to("cpu"), torch.device("cpu"),
                                           n_warmup=3, n_measure=15)
 
+    w_precision, w_recall, w_f1 = weighted_metrics(y_true, y_pred)
+
     metrics = {
         "test_accuracy": acc,
+        "test_error_rate": 1.0 - acc,
         "test_precision_macro": precision,
         "test_recall_macro": recall,
         "test_f1_macro": f1,
+        "test_precision_weighted": w_precision,
+        "test_recall_weighted": w_recall,
+        "test_f1_weighted": w_f1,
         "latency_ms_mean": latency_mean,
         "latency_ms_p95": latency_p95,
         "latency_ms_mean_cpu": cpu_latency_mean,
@@ -367,32 +415,29 @@ def main():
         "dataset_hygiene": dataset_hygiene(),
     }
 
-    with open(config.METRICS_PATH, "w") as f:
-        json.dump(metrics, f, indent=2)
-
     letters = [label_map[i] for i in sorted(label_map)]
     cm = confusion_matrix(y_true, y_pred, labels=sorted(label_map))
+    metrics["confusion_matrix"] = cm.tolist()
+    metrics["classes"] = letters
+
+    with open(config.METRICS_PATH, "w") as f:
+        json.dump(metrics, f, indent=2)
     with open(config.CONFUSION_PATH, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["true\\pred"] + letters)
         for letter, row in zip(letters, cm):
             writer.writerow([letter] + row.tolist())
 
-    print("\n=== TEST SET RESULTS ===")
-    print(f"Accuracy:  {acc*100:.2f}%")
-    print(f"Precision: {precision*100:.2f}% (macro)")
-    print(f"Recall:    {recall*100:.2f}% (macro)")
-    print(f"F1-score:  {f1*100:.2f}% (macro)")
-    print(f"Latency:   {latency_mean:.1f} ms/window avg on {metrics['device']}, "
-          f"{cpu_latency_mean:.1f} ms on CPU")
-    print(f"Model:     {n_params/1e6:.2f}M params, {metrics['model_size_mb']:.1f} MB")
+    # One implementation of the report, shared with `python report.py`, so the
+    # numbers shown at the end of training and the ones printed later can
+    # never drift apart.
+    print_report(metrics, cm, letters)
 
-    weakest = sorted(metrics["per_class"].items(), key=lambda kv: kv[1]["f1"])[:5]
-    print("\nWeakest letters (F1): " + ", ".join(f"{k}={v['f1']*100:.0f}%" for k, v in weakest))
-
-    print(f"\nSaved model -> {config.MODEL_PATH}")
-    print(f"Saved metrics -> {config.METRICS_PATH}")
-    print(f"Saved confusion matrix -> {config.CONFUSION_PATH}")
+    print(f"Model tersimpan         -> {config.MODEL_PATH}")
+    print(f"Metrik tersimpan        -> {config.METRICS_PATH}")
+    print(f"Confusion matrix (CSV)  -> {config.CONFUSION_PATH}")
+    print(f"Kurva training (CSV)    -> {config.HISTORY_PATH}")
+    print("\nCetak ulang laporan ini kapan saja:  python report.py")
 
 
 if __name__ == "__main__":
