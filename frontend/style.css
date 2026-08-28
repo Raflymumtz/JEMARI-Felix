@@ -170,6 +170,54 @@ video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
 
 .footer { text-align: center; color: var(--text-dim); padding: 30px 0 40px; font-size: 0.8rem; }
 
+/* Per-class metrics table (populated from /api/metrics) */
+.per-class {
+  margin-top: 18px;
+  overflow-x: auto;          /* narrow phones scroll the table, not the page */
+  -webkit-overflow-scrolling: touch;
+}
+.per-class table { border-collapse: collapse; width: 100%; min-width: 460px; font-size: 0.82rem; }
+.per-class th, .per-class td { padding: 6px 10px; text-align: right; white-space: nowrap; }
+.per-class th { color: var(--text-dim); font-weight: 600; border-bottom: 1px solid var(--border); }
+.per-class td:first-child, .per-class th:first-child { text-align: left; font-weight: 700; }
+.per-class tbody tr:nth-child(odd) { background: rgba(255,255,255,0.02); }
+.per-class .weak td { color: var(--danger); }
+.per-class .caption { color: var(--text-dim); font-size: 0.8rem; margin: 10px 0 0; line-height: 1.5; }
+
+.hygiene-note {
+  margin-top: 14px; padding: 12px 14px;
+  background: rgba(79,140,255,0.08);
+  border: 1px solid rgba(79,140,255,0.35);
+  border-radius: 10px;
+  font-size: 0.82rem; color: var(--text-dim); line-height: 1.6;
+}
+.hygiene-note strong { color: var(--text); }
+
 @media (max-width: 880px) {
   .layout { grid-template-columns: 1fr; }
+}
+
+/* Phone portrait: bigger touch targets, no horizontal page scroll */
+@media (max-width: 620px) {
+  .topbar-inner { padding: 14px 16px; }
+  .brand { gap: 10px; }
+  .brand-icon { font-size: 1.8rem; }
+  .brand h1 { font-size: 1.1rem; }
+  .subtitle { font-size: 0.8rem; }
+
+  .layout { margin: 16px auto; padding: 0 14px; gap: 14px; }
+  .panel { padding: 14px; }
+
+  .video-wrap { aspect-ratio: 3 / 4; }   /* portrait framing suits a held-up hand */
+  .letter-overlay { font-size: 2.4rem; padding: 4px 16px; min-width: 58px; }
+
+  /* 44px is the minimum comfortable touch target */
+  .btn { padding: 12px 16px; min-height: 44px; font-size: 1rem; flex: 1 1 auto; }
+  .controls, .text-controls { gap: 8px; }
+  .text-controls .btn { flex: 1 1 40%; }
+
+  #outputText { font-size: 1.2rem; padding: 12px; }
+  .metrics-grid { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+  .metric-card { padding: 10px; }
+  .metric-card .value { font-size: 1.15rem; }
 }

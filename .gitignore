@@ -15,6 +15,13 @@ Dataset/*
 Dataset/PROCESSED/*
 !Dataset/PROCESSED/manifest.json
 
+# Self-signed TLS material for `server.py --https` (regenerated on demand;
+# a private key must never be committed)
+backend/certs/
+
+# Parity-check output images
+tools/parity_out/
+
 # OS / editor
 Thumbs.db
 .DS_Store

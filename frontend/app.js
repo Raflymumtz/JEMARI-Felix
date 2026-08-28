@@ -15,6 +15,11 @@ const CONFIG = {
   CAPTURE_WIDTH: 320,
   CAPTURE_HEIGHT: 240,
   JPEG_QUALITY: 0.7,
+  // On a phone over mobile data the round trip can far exceed the capture
+  // interval. Sending faster than the server answers only grows a backlog, so
+  // back off toward this ceiling when measured latency says we are ahead.
+  MAX_INTERVAL_MS: 400,
+  LATENCY_BACKOFF_MS: 450,
 };
 
 const els = {
@@ -46,6 +51,8 @@ let ws = null;
 let stream = null;
 let captureTimer = null;
 let latencyHistory = [];
+let wakeLock = null;
+let captureInterval = CONFIG.CAPTURE_INTERVAL_MS;
 
 // --- debounce state ---
 let voteHistory = [];
@@ -82,6 +89,7 @@ function handleServerMessage(data) {
     if (latencyHistory.length > 20) latencyHistory.shift();
     const avg = latencyHistory.reduce((a, b) => a + b, 0) / latencyHistory.length;
     els.latencyValue.textContent = `${avg.toFixed(0)} ms`;
+    adaptCaptureRate(avg);
   }
 
   els.handIndicator.textContent = hand_detected ? "Tangan terdeteksi" : "Tangan tidak terdeteksi";
@@ -93,6 +101,23 @@ function handleServerMessage(data) {
   els.confidenceValue.textContent = `${pct}%`;
 
   applyDebounce(letter, confidence, hand_detected);
+}
+
+// Keep the send rate just under what the round trip can sustain. Without
+// this, a slow phone connection makes the displayed letter lag further and
+// further behind the hand and never catch up.
+function adaptCaptureRate(avgLatency) {
+  if (latencyHistory.length < 10) return;
+  const target = avgLatency > CONFIG.LATENCY_BACKOFF_MS
+    ? Math.min(captureInterval + 40, CONFIG.MAX_INTERVAL_MS)
+    : Math.max(captureInterval - 20, CONFIG.CAPTURE_INTERVAL_MS);
+  if (target !== captureInterval) {
+    captureInterval = target;
+    if (captureTimer) {
+      clearInterval(captureTimer);
+      captureTimer = setInterval(captureAndSend, captureInterval);
+    }
+  }
 }
 
 function applyDebounce(letter, confidence, handDetected) {
@@ -157,9 +182,39 @@ async function startCamera() {
     els.stopBtn.disabled = false;
 
     if (!ws || ws.readyState === WebSocket.CLOSED) connectWebSocket();
-    captureTimer = setInterval(captureAndSend, CONFIG.CAPTURE_INTERVAL_MS);
+    captureInterval = CONFIG.CAPTURE_INTERVAL_MS;
+    captureTimer = setInterval(captureAndSend, captureInterval);
+    requestWakeLock();
   } catch (err) {
-    alert("Tidak dapat mengakses kamera: " + err.message);
+    // On a phone this is almost always the secure-context rule rather than a
+    // hardware problem: Chrome only grants camera access over HTTPS or on
+    // localhost, so http://<LAN-IP> is refused outright.
+    const insecure = !window.isSecureContext;
+    alert(
+      "Tidak dapat mengakses kamera: " + err.message +
+      (insecure
+        ? "\n\nHalaman ini dibuka lewat koneksi tidak aman (HTTP). " +
+          "Chrome hanya mengizinkan kamera pada HTTPS atau localhost. " +
+          "Buka lewat alamat HTTPS (lihat README: cloudflared tunnel) " +
+          "atau jalankan server dengan: python server.py --https"
+        : "")
+    );
+  }
+}
+
+// Spelling a word takes a while with both hands busy — keep the screen on.
+async function requestWakeLock() {
+  try {
+    if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen");
+  } catch (e) {
+    /* not supported or denied — harmless */
+  }
+}
+
+function releaseWakeLock() {
+  if (wakeLock) {
+    wakeLock.release().catch(() => {});
+    wakeLock = null;
   }
 }
 
@@ -170,6 +225,7 @@ function stopCamera() {
     stream.getTracks().forEach((t) => t.stop());
     stream = null;
   }
+  releaseWakeLock();
   els.startBtn.disabled = false;
   els.stopBtn.disabled = true;
   els.letterOverlay.textContent = "—";
@@ -207,6 +263,47 @@ async function loadClasses() {
   }
 }
 
+function metricsTable(perClass) {
+  const entries = Object.entries(perClass);
+  if (!entries.length) return "";
+  const f1s = entries.map(([, m]) => m.f1);
+  const weakCut = Math.min(0.75, [...f1s].sort((a, b) => a - b)[Math.floor(f1s.length * 0.2)]);
+
+  const rows = entries.map(([letter, m]) => `
+    <tr class="${m.f1 <= weakCut ? "weak" : ""}">
+      <td>${letter}</td>
+      <td>${(m.precision * 100).toFixed(0)}%</td>
+      <td>${(m.recall * 100).toFixed(0)}%</td>
+      <td>${(m.f1 * 100).toFixed(0)}%</td>
+      <td>${m.support}</td>
+    </tr>`).join("");
+
+  return `
+    <div class="per-class">
+      <table>
+        <thead><tr><th>Huruf</th><th>Presisi</th><th>Recall</th><th>F1</th><th>Sampel uji</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p class="caption">Huruf bertanda merah adalah yang paling lemah dan paling
+      layak ditambah datanya. Kolom terakhir adalah jumlah sekuens uji untuk
+      huruf tersebut — semakin kecil, semakin kasar angkanya.</p>
+    </div>`;
+}
+
+function hygieneNote(h) {
+  if (!h || !h.raw_files) return "";
+  return `
+    <div class="hygiene-note">
+      <strong>Kebersihan data.</strong> Dari ${h.raw_files.toLocaleString("id-ID")} berkas mentah,
+      ${h.offline_augmented_excluded.toLocaleString("id-ID")} berkas hasil augmentasi offline
+      (flip/rotate/aug) dan ${h.exact_duplicates_excluded} duplikat identik dikeluarkan, menyisakan
+      ${h.frames_used.toLocaleString("id-ID")} gambar asli
+      (${h.frames_with_detected_hand.toLocaleString("id-ID")} di antaranya tangannya terdeteksi MediaPipe).
+      Pembagian data dipotong per sesi pengambilan dan diverifikasi tidak memuat satu pun
+      gambar kembar antar-split, sehingga akurasi di atas tidak dilebihkan oleh kebocoran data.
+    </div>`;
+}
+
 async function loadMetrics() {
   try {
     const res = await fetch("/api/metrics");
@@ -215,6 +312,7 @@ async function loadMetrics() {
       els.aboutContent.innerHTML = "<p>Model belum dilatih. Jalankan <code>train.py</code> di backend untuk menghasilkan metrik evaluasi.</p>";
       return;
     }
+    const sizeMb = m.model_size_mb ? `${m.model_size_mb.toFixed(1)} MB` : "—";
     els.aboutContent.innerHTML = `
       <div class="metrics-grid">
         <div class="metric-card"><div class="label">Akurasi</div><div class="value">${(m.test_accuracy * 100).toFixed(1)}%</div></div>
@@ -222,14 +320,22 @@ async function loadMetrics() {
         <div class="metric-card"><div class="label">Recall (macro)</div><div class="value">${(m.test_recall_macro * 100).toFixed(1)}%</div></div>
         <div class="metric-card"><div class="label">F1-score (macro)</div><div class="value">${(m.test_f1_macro * 100).toFixed(1)}%</div></div>
         <div class="metric-card"><div class="label">Latensi model</div><div class="value">${m.latency_ms_mean.toFixed(0)} ms</div></div>
-        <div class="metric-card"><div class="label">Perangkat pelatihan</div><div class="value" style="font-size:0.95rem">${m.device}</div></div>
+        <div class="metric-card"><div class="label">Ukuran model</div><div class="value">${sizeMb}</div></div>
       </div>
-      <p>Dievaluasi pada ${m.test_windows} sekuens uji dari ${m.num_classes} kelas huruf, jendela temporal ${m.window} frame @ ${m.img_size}x${m.img_size}px.</p>
+      <p>Dievaluasi pada ${m.test_windows} sekuens uji dari ${m.num_classes} kelas huruf, jendela
+      temporal ${m.window} frame @ ${m.img_size}x${m.img_size}px${m.backbone ? `, backbone ${m.backbone}` : ""}${m.n_params ? ` (${(m.n_params / 1e6).toFixed(2)} juta parameter)` : ""}.
+      Dilatih pada ${m.device}.</p>
+      ${m.per_class ? metricsTable(m.per_class) : ""}
+      ${hygieneNote(m.dataset_hygiene)}
     `;
   } catch (e) {
     els.aboutContent.innerHTML = "<p>Metrik belum tersedia.</p>";
   }
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && captureTimer) requestWakeLock();
+});
 
 els.startBtn.addEventListener("click", startCamera);
 els.stopBtn.addEventListener("click", stopCamera);
